@@ -909,17 +909,20 @@ maybe_modify_headers(#url{host = Host, port = Port} = Url,
     end.
 
 add_auth_headers(#url{username = User,
-                      password = UPw},
+                      password = UPw} = Url,
                  Options,
                  Headers,
                  State) ->
     Headers_1 = case User of
                     undefined ->
-                        case get_value(basic_auth, Options, undefined) of
+                        case get_value(auth, Options, undefined) of
                             undefined ->
                                 Headers;
-                            {U,P} ->
-                                [{"Authorization", ["Basic ", http_auth_basic(U, P)]} | Headers]
+                            {basic,U,P} ->
+                                [{"Authorization", ["Basic ", http_auth_basic(U, P)]} | Headers];
+                            {digest,U,P} ->
+                                {_,_,Request_Headers,[]} = ibrowse:send_req(Url#url.abspath,[], get),
+                                [{"Authorization", ["Digest ", http_auth_digest(Request_Headers, Url, U, P)]} | Headers]
                         end;
                     _ ->
                         [{"Authorization", ["Basic ", http_auth_basic(User, UPw)]} | Headers]
@@ -932,6 +935,44 @@ add_proxy_auth_headers(#state{proxy_auth_basic = []}, Headers) ->
     Headers;
 add_proxy_auth_headers(#state{proxy_auth_basic = Auth_basic}, Headers) ->
     [{"Proxy-Authorization", ["Basic ", Auth_basic]} | Headers].
+
+http_auth_digest(Request_Headers, Url, User, Password) ->
+    Params = get_digest_params(Request_Headers),
+    Realm =  get_value("Digest realm", Params),
+    Nonce =  get_value("nonce", Params),
+    Opaque = get_value("opaque", Params),
+    Qop = get_value("qop", Params),
+    Cnonce = random:uniform(10000000),
+    Response = create_digest_response(User, Password, Realm, Qop, Url#url.abspath, Nonce, Cnonce),
+    Digest = ["username=" ++ User,
+       "realm=" ++ Realm,
+       "nonce=" ++ Nonce,
+       "uri=" ++ Url,
+       "cnonce=" ++ Cnonce,
+       "response=" ++ Response,
+       "opaque=" ++ Opaque,
+       "nc=" ++ "00000001",
+       "qop=" ++ Qop],
+    string:join(Digest, ", ").
+
+get_digest_params(Request_Headers) ->
+    WWW_Authenticate = get_value("WWW-Authenticate", Request_Headers),
+    Key_Value_Regex = "\\s?([\\w\\s]+)=\"([\\w\\s=\]+)\\\"",
+    {match, Matches} = re:run(WWW_Authenticate,Key_Value_Regex, [global, {capture, all, list}]),
+    Match_List_Tuple = fun(X) -> [_|Tail] = X, erlang:list_to_tuple(Tail) end,
+    lists:map(Match_List_Tuple, Matches).
+
+get_md5_hex_str(Str) ->
+    X = erlang:md5(Str),
+    [begin if N < 10 -> 48 + N; true -> 87 + N end end || <<N:4>> <= X].
+
+create_digest_response(User, Password, Realm, Qop, Url, Nonce, Cnonce) ->
+    Ha1 = get_md5_hex_str(string:join([User, Realm, Password], ":")),
+    Ha2 = get_md5_hex_str(string:join(["GET", Url], ":")),
+    create_digest_response(Ha1, Ha2, Qop, Nonce, Cnonce).
+
+create_digest_response(Ha1, Ha2, _qop, Nonce, Cnonce) ->
+    get_md5_hex_str(string:join([Ha1, Nonce, "00000001", Cnonce, "auth", Ha2],":")).
 
 http_auth_basic([], []) ->
     [];
